@@ -7,9 +7,64 @@ from sklearn.preprocessing import StandardScaler
 from scipy.optimize import minimize
 import torch
 import torch.nn as nn
+from torch.utils.data import Dataset
 import xgboost as xgb
 from tqdm import tqdm
 
+
+def prepare_data(df, features, target, test_size=0.2, val_size=0.1, random_state=42):
+    """
+    Prepare training, validation, and test splits with scaling.
+
+    Args:
+        df (pd.DataFrame): Dataset including features and target.
+        features (list): List of feature column names.
+        target (str): Target column name.
+        test_size (float): Fraction of data for test set.
+        val_size (float): Fraction of train+val for validation.
+        random_state (int): Random seed for reproducibility.
+
+    Returns:
+        X_train_scaled, X_val_scaled, X_test_scaled (np.ndarray)
+        y_train, y_val, y_test (np.ndarray)
+        scaler (StandardScaler): fitted scaler on training data
+    """
+    X = df[features].values
+    y = df[target].values
+
+    # Split train+val and test sets
+    X_temp, X_test, y_temp, y_test = train_test_split(
+        X, y, test_size=test_size, random_state=random_state, stratify=y
+    )
+
+    # Split train and val sets
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_temp, y_temp, test_size=val_size, random_state=random_state, stratify=y_temp
+    )
+
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_val_scaled = scaler.transform(X_val)
+    X_test_scaled = scaler.transform(X_test)
+
+    return X_train_scaled, X_val_scaled, X_test_scaled, y_train, y_val, y_test, scaler
+
+
+class MolDataset(Dataset):
+    def __init__(self, X, y):
+        """
+        Args:
+            X (np.ndarray): Feature matrix.
+            y (np.ndarray): Target labels.
+        """
+        self.X = torch.tensor(X, dtype=torch.float32)
+        self.y = torch.tensor(y, dtype=torch.long)
+
+    def __len__(self):
+        return len(self.y)
+
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx]
 
 def plot_classification_report(y_test, y_pred, class_names=None):
     """
@@ -137,56 +192,50 @@ def train_mlp_classifier(model, train_loader, val_loader, epochs=500, lr=1e-3, p
     model.load_state_dict(best_model_wts)
     return model
 
-
-def per_bin_classification(df, features, target_col='Tm_bin', param_grid=None):
+def train_multiclass_classifier(df, features, target_col='Tm_bin', param_grid=None):
     """
-    Perform classification per bin of the target variable using XGBClassifier with hyperparameter tuning.
+    Train a single XGBoost multi-class classifier on all bins.
 
     Args:
-        df (pd.DataFrame): Input DataFrame containing features and target.
-        features (list): List of feature column names.
-        target_col (str, optional): Target column name to bin. Defaults to 'Tm_bin'.
-        param_grid (dict, optional): Parameter grid for GridSearchCV.
+        df (pd.DataFrame): DataFrame with features and target column.
+        features (list): List of selected feature column names.
+        target_col (str): Name of the target column with bin labels.
+        param_grid (dict): Grid search parameters.
 
     Returns:
-        dict: Dictionary mapping bin label to trained model, scaler, accuracy, and predictions.
+        dict: Model, scaler, accuracy, predictions, etc.
     """
-    results = {}
+    X = df[features].values
+    y = df[target_col].values
 
-    for bin_label in sorted(df[target_col].unique()):
-        print(f"\n--- Hyperparameter tuning and training classifier for bin {bin_label} ---")
+    # Split data into train, val, and test sets
+    X_temp, X_test, y_temp, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_temp, y_temp, test_size=0.1, random_state=42, stratify=y_temp
+    )
 
-        bin_df = df[df[target_col] == bin_label].reset_index(drop=True)
+    # Scale data
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_val_scaled = scaler.transform(X_val)
+    X_test_scaled = scaler.transform(X_test)
 
-        X = bin_df[features].values
-        y = bin_df[target_col].values
+    # Define model
+    xgb_clf = xgb.XGBClassifier(
+        tree_method='gpu_hist',
+        predictor='gpu_predictor',
+        gpu_id=0,
+        objective='multi:softprob',
+        num_class=3,
+        eval_metric='mlogloss',
+        random_state=42
+    )
 
-        # Split (train/val/test) within bin
-        X_temp, X_test, y_temp, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42, stratify=y
-        )
-        X_train, X_val, y_train, y_val = train_test_split(
-            X_temp, y_temp, test_size=0.1, random_state=42, stratify=y_temp
-        )
+    fit_params = {"eval_set": [(X_val_scaled, y_val)], "verbose": False}
 
-        scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_val_scaled = scaler.transform(X_val)
-        X_test_scaled = scaler.transform(X_test)
-
-        xgb_clf = xgb.XGBClassifier(
-            tree_method='gpu_hist',
-            predictor='gpu_predictor',
-            gpu_id=0,
-            objective='multi:softprob',
-            eval_metric='mlogloss',
-            use_label_encoder=False,
-            random_state=42,
-            n_jobs=1
-        )
-
-        fit_params = {"eval_set": [(X_val_scaled, y_val)], "verbose": False}
-
+    if param_grid:
         grid_search = GridSearchCV(
             estimator=xgb_clf,
             param_grid=param_grid,
@@ -195,28 +244,30 @@ def per_bin_classification(df, features, target_col='Tm_bin', param_grid=None):
             verbose=1,
             n_jobs=1
         )
-
         grid_search.fit(X_train_scaled, y_train, **fit_params)
         best_model = grid_search.best_estimator_
+        print(f"Best hyperparameters: {grid_search.best_params_}")
+    else:
+        best_model = xgb_clf
+        best_model.fit(X_train_scaled, y_train, **fit_params)
 
-        y_pred = best_model.predict(X_test_scaled)
-        acc = accuracy_score(y_test, y_pred)
+    # Evaluation
+    y_pred = best_model.predict(X_test_scaled)
+    acc = accuracy_score(y_test, y_pred)
 
-        print(f"Bin {bin_label} best params: {grid_search.best_params_}")
-        print(f"Bin {bin_label} Accuracy: {acc:.3f}")
-        print("Classification Report:")
-        print(classification_report(y_test, y_pred))
+    print(f"\nTest Accuracy: {acc:.3f}")
+    print("Classification Report:")
+    print(classification_report(y_test, y_pred))
 
-        results[bin_label] = {
-            'model': best_model,
-            'scaler': scaler,
-            'accuracy': acc,
-            'X_test': X_test_scaled,
-            'y_test': y_test,
-            'y_pred': y_pred,
-        }
+    return {
+        'model': best_model,
+        'scaler': scaler,
+        'accuracy': acc,
+        'X_test': X_test_scaled,
+        'y_test': y_test,
+        'y_pred': y_pred,
+    }
 
-    return results
 
 
 def train_ensemble_weights(mlp_probs, xgb_probs, y_true):

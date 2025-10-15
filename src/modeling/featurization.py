@@ -105,24 +105,3 @@ def compute_feature_importance(
 
     top_features = importance_df[importance_df['Cumulative'] <= threshold]
     return top_features
-
-
-def bin_targets(
-    series: pd.Series,
-    bin_edges: list,
-    labels: list = None,
-    include_lowest: bool = True
-) -> pd.Series:
-    """
-    Bin a continuous target variable into categorical classes.
-
-    Parameters:
-        series (pd.Series): The target variable to bin.
-        bin_edges (list): List of bin edge values.
-        labels (list, optional): Class labels for the bins.
-        include_lowest (bool): Whether to include the lowest value in the first bin.
-
-    Returns:
-        pd.Series: Binned target as categorical integers or labels.
-    """
-    return pd.cut(series, bins=bin_edges, labels=labels, include_lowest=include_lowest)
