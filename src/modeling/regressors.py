@@ -34,7 +34,7 @@ def per_bin_grid_search(
     features: List[str],
     target_col: str = 'Tm',
     bin_col: str = 'Tm_bin',
-    param_grid: Optional[Dict[str, List[Any]]] = None
+    param_grids: Optional[Dict[int, Dict[str, List[Any]]]] = None  # changed here
 ) -> Dict[int, Dict]:
     """
     Train and tune an XGBRegressor model for each bin in the dataset.
@@ -75,17 +75,19 @@ def per_bin_grid_search(
             n_jobs=1
         )
 
-        fit_params = {"eval_set": [(X_val_scaled, y_val)], "verbose": False}
-
+        
+        bin_param_grid = param_grids.get(bin_label, {})
+        
         grid_search = GridSearchCV(
             estimator=xgb_reg,
-            param_grid=param_grid,
+            param_grid=bin_param_grid,
             cv=3,
             scoring='neg_mean_absolute_error',
             verbose=1,
             n_jobs=1
         )
 
+        fit_params = {"eval_set": [(X_val_scaled, y_val)], "verbose": False}
         grid_search.fit(X_train_scaled, y_train, **fit_params)
         best_model = grid_search.best_estimator_
 
@@ -93,6 +95,7 @@ def per_bin_grid_search(
         mae = mean_absolute_error(y_test, y_pred)
         rmse = np.sqrt(mean_squared_error(y_test, y_pred))
 
+        print(f"Bin {bin_label} best CV MAE:", -grid_search.best_score_)
         print(f"Bin {bin_label} best params: {grid_search.best_params_}")
         print(f"Bin {bin_label} MAE: {mae:.3f}, RMSE: {rmse:.3f}")
 

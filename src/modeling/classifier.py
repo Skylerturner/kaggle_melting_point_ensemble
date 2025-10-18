@@ -96,8 +96,8 @@ class MLPClassifier(nn.Module):
         dropout (float, optional): Dropout rate after each hidden layer. Defaults to 0.3.
     """
 
-    def __init__(self, input_dim, num_classes=3, hidden_layers=(128, 512, 512, 128),
-                 activation='silu', dropout=0.3):
+    def __init__(self, input_dim, num_classes=3, hidden_layers=(128, 256, 256, 256, 128),
+                 activation='silu', dropout=0.35):
         super(MLPClassifier, self).__init__()
         self.hidden_layers = hidden_layers
         self.activation = activation
@@ -138,7 +138,7 @@ class MLPClassifier(nn.Module):
         return self.model(x)
 
 
-def train_mlp_classifier(model, train_loader, val_loader, epochs=500, lr=1e-3, patience=30):
+def train_mlp_classifier(model, train_loader, val_loader, epochs=500, lr=5e-4, patience=50):
     """
     Train a PyTorch MLPClassifier model with early stopping based on validation loss.
 
@@ -147,7 +147,7 @@ def train_mlp_classifier(model, train_loader, val_loader, epochs=500, lr=1e-3, p
         train_loader (DataLoader): DataLoader for training data.
         val_loader (DataLoader): DataLoader for validation data.
         epochs (int, optional): Max number of epochs. Defaults to 500.
-        lr (float, optional): Learning rate. Defaults to 1e-3.
+        lr (float, optional): Learning rate. Defaults to 5e-4.
         patience (int, optional): Number of epochs with no improvement to stop early. Defaults to 50.
 
     Returns:
@@ -155,7 +155,7 @@ def train_mlp_classifier(model, train_loader, val_loader, epochs=500, lr=1e-3, p
     """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
-    criterion = nn.CrossEntropyLoss(label_smoothing=0.15)
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
     best_val_loss = float('inf')
     patience_counter = 0
@@ -244,11 +244,13 @@ def train_multiclass_classifier(X_train, X_val, X_test, y_train, y_val, y_test, 
         n_jobs=-1,
         random_state=42,
         max_depth=8,
+        learning_rate=0.01,
         n_estimators=400,
         subsample=0.85,
         colsample_bytree=0.8,
         gamma=0.9
     )
+
 
     fit_params = {"eval_set": [(X_val, y_val)], "verbose": False}
 
@@ -274,6 +276,7 @@ def train_multiclass_classifier(X_train, X_val, X_test, y_train, y_val, y_test, 
     y_pred = best_model.predict(X_test)
     acc = accuracy_score(y_test, y_pred)
 
+    print("Best CV Score:", grid_search.best_score_ if param_grid else "N/A")
     print(f"\nTest Accuracy: {acc:.3f}")
     print("Classification Report:")
     plot_classification_report(y_test, y_pred)
@@ -289,7 +292,8 @@ def train_multiclass_classifier(X_train, X_val, X_test, y_train, y_val, y_test, 
 
 def train_ensemble_weights(mlp_probs, xgb_probs, y_true):
     """
-    Optimize per-class ensemble weights for combining MLP and XGB classifier probabilities.
+    Optimize per-class ensemble weights for combining MLP and XGB classifier probabilities,
+    using macro-average per-class accuracy.
 
     Args:
         mlp_probs (np.ndarray): MLP classifier probabilities (N x C).
@@ -298,39 +302,31 @@ def train_ensemble_weights(mlp_probs, xgb_probs, y_true):
 
     Returns:
         np.ndarray: Optimized weights per class (array of length C).
+        float: Best per-class accuracy.
+        np.ndarray: Best prediction array.
     """
-    num_classes = mlp_probs.shape[1]
-    weights = np.ones(num_classes) * 0.5  # start with equal weights
-    
-    def loss_fn(w):
-        ensemble_probs = np.zeros_like(mlp_probs)
-        for c in range(num_classes):
-            ensemble_probs[:, c] = w[c] * mlp_probs[:, c] + (1 - w[c]) * xgb_probs[:, c]
-        ensemble_probs = np.clip(ensemble_probs, 1e-9, 1 - 1e-9)
-        nll = -np.mean(np.log(ensemble_probs[np.arange(len(y_true)), y_true]))
-        return nll
+    alphas = np.linspace(0, 1, 11)
+    best_score = 0
+    best_weights = None
+    best_preds = None
 
-    bounds = [(0, 1)] * num_classes
-    res = minimize(loss_fn, weights, bounds=bounds)
-    if res.success:
-        return res.x
-    else:
-        print("Optimization failed, returning default weights")
-        return weights
+    for alpha_0 in alphas:
+        for alpha_1 in alphas:
+            for alpha_2 in alphas:
+                weights = np.array([alpha_0, alpha_1, alpha_2])
+                ensemble_probs = weights * mlp_probs + (1 - weights) * xgb_probs
+                y_pred = np.argmax(ensemble_probs, axis=1)
 
+                # --- Compute per-class accuracy ---
+                cm = confusion_matrix(y_true, y_pred)
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    per_class_acc = np.diag(cm) / np.sum(cm, axis=1)
+                    per_class_acc = np.nan_to_num(per_class_acc)  # replaces NaNs with 0
+                avg_per_class_acc = per_class_acc.mean()
 
-def ensemble_probabilities(mlp_probs, xgb_probs, weights):
-    """
-    Combine MLP and XGB probabilities using class-specific weights.
-    
-    Args:
-        mlp_probs (np.ndarray): MLP probabilities (N x C)
-        xgb_probs (np.ndarray): XGB probabilities (N x C)
-        weights (np.ndarray): Optimized weights per class (length C)
-    
-    Returns:
-        np.ndarray: Ensemble probabilities (N x C)
-    """
-    ensemble_probs = weights * mlp_probs + (1 - weights) * xgb_probs
-    return ensemble_probs
+                if avg_per_class_acc > best_score:
+                    best_score = avg_per_class_acc
+                    best_weights = weights
+                    best_preds = y_pred
 
+    return best_weights, best_score, best_preds
