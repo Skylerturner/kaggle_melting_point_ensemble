@@ -7,10 +7,12 @@ from sklearn.preprocessing import StandardScaler
 from scipy.optimize import minimize
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader, TensorDataset
 import xgboost as xgb
 from tqdm import tqdm
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def prepare_data(df, features, target, test_size=0.2, val_size=0.1, random_state=42):
     """
@@ -136,7 +138,7 @@ class MLPClassifier(nn.Module):
         return self.model(x)
 
 
-def train_mlp_classifier(model, train_loader, val_loader, epochs=500, lr=1e-3, patience=50):
+def train_mlp_classifier(model, train_loader, val_loader, epochs=500, lr=1e-3, patience=30):
     """
     Train a PyTorch MLPClassifier model with early stopping based on validation loss.
 
@@ -152,8 +154,8 @@ def train_mlp_classifier(model, train_loader, val_loader, epochs=500, lr=1e-3, p
         nn.Module: Trained model with best validation weights loaded.
     """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.15)
 
     best_val_loss = float('inf')
     patience_counter = 0
@@ -192,37 +194,46 @@ def train_mlp_classifier(model, train_loader, val_loader, epochs=500, lr=1e-3, p
     model.load_state_dict(best_model_wts)
     return model
 
-def train_multiclass_classifier(df, features, target_col='Tm_bin', param_grid=None):
+def evaluate_model(model, test_loader):
     """
-    Train a single XGBoost multi-class classifier on all bins.
+    Evaluate a trained PyTorch model on a test dataset and compute accuracy.
 
     Args:
-        df (pd.DataFrame): DataFrame with features and target column.
-        features (list): List of selected feature column names.
-        target_col (str): Name of the target column with bin labels.
-        param_grid (dict): Grid search parameters.
+        model (nn.Module): Trained PyTorch model to evaluate.
+        test_loader (DataLoader): DataLoader providing test data batches.
 
     Returns:
-        dict: Model, scaler, accuracy, predictions, etc.
+        tuple:
+            - acc (float): Accuracy score on the test set.
+            - y_true (list): True labels from the test set.
+            - y_pred (list): Predicted labels by the model.
     """
-    X = df[features].values
-    y = df[target_col].values
+    model.eval()
+    y_true, y_pred = [], []
 
-    # Split data into train, val, and test sets
-    X_temp, X_test, y_temp, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_temp, y_temp, test_size=0.1, random_state=42, stratify=y_temp
-    )
+    with torch.no_grad():
+        for xb, yb in test_loader:
+            xb = xb.to(device)
+            preds = model(xb).argmax(dim=1).cpu().numpy()
+            y_true.extend(yb.numpy())
+            y_pred.extend(preds)
 
-    # Scale data
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_val_scaled = scaler.transform(X_val)
-    X_test_scaled = scaler.transform(X_test)
+    acc = accuracy_score(y_true, y_pred)
+    return acc, y_true, y_pred
 
-    # Define model
+
+def train_multiclass_classifier(X_train, X_val, X_test, y_train, y_val, y_test, param_grid=None):
+    """
+    Train an XGBoost multi-class classifier using preprocessed data.
+
+    Args:
+        X_train, X_val, X_test (np.ndarray): Scaled feature matrices.
+        y_train, y_val, y_test (np.ndarray): Corresponding labels.
+        param_grid (dict, optional): Grid search parameters.
+
+    Returns:
+        dict: Model, accuracy, predictions, etc.
+    """
     xgb_clf = xgb.XGBClassifier(
         tree_method='gpu_hist',
         predictor='gpu_predictor',
@@ -230,10 +241,16 @@ def train_multiclass_classifier(df, features, target_col='Tm_bin', param_grid=No
         objective='multi:softprob',
         num_class=3,
         eval_metric='mlogloss',
-        random_state=42
+        n_jobs=-1,
+        random_state=42,
+        max_depth=8,
+        n_estimators=400,
+        subsample=0.85,
+        colsample_bytree=0.8,
+        gamma=0.9
     )
 
-    fit_params = {"eval_set": [(X_val_scaled, y_val)], "verbose": False}
+    fit_params = {"eval_set": [(X_val, y_val)], "verbose": False}
 
     if param_grid:
         grid_search = GridSearchCV(
@@ -244,26 +261,26 @@ def train_multiclass_classifier(df, features, target_col='Tm_bin', param_grid=No
             verbose=1,
             n_jobs=1
         )
-        grid_search.fit(X_train_scaled, y_train, **fit_params)
+        
+        grid_search.fit(X_train, y_train, **fit_params)
         best_model = grid_search.best_estimator_
         print(f"Best hyperparameters: {grid_search.best_params_}")
+
     else:
         best_model = xgb_clf
-        best_model.fit(X_train_scaled, y_train, **fit_params)
+        best_model.fit(X_train, y_train, **fit_params)
 
     # Evaluation
-    y_pred = best_model.predict(X_test_scaled)
+    y_pred = best_model.predict(X_test)
     acc = accuracy_score(y_test, y_pred)
 
     print(f"\nTest Accuracy: {acc:.3f}")
     print("Classification Report:")
-    print(classification_report(y_test, y_pred))
+    plot_classification_report(y_test, y_pred)
 
     return {
         'model': best_model,
-        'scaler': scaler,
         'accuracy': acc,
-        'X_test': X_test_scaled,
         'y_test': y_test,
         'y_pred': y_pred,
     }
@@ -304,19 +321,16 @@ def train_ensemble_weights(mlp_probs, xgb_probs, y_true):
 
 def ensemble_probabilities(mlp_probs, xgb_probs, weights):
     """
-    Compute weighted ensemble probabilities per class combining MLP and XGB outputs.
-
+    Combine MLP and XGB probabilities using class-specific weights.
+    
     Args:
-        mlp_probs (np.ndarray): MLP model probabilities (N x C).
-        xgb_probs (np.ndarray): XGB model probabilities (N x C).
-        weights (dict): Dictionary of weights per class (keys like "alpha_extra_0").
-
+        mlp_probs (np.ndarray): MLP probabilities (N x C)
+        xgb_probs (np.ndarray): XGB probabilities (N x C)
+        weights (np.ndarray): Optimized weights per class (length C)
+    
     Returns:
-        np.ndarray: Ensemble combined probabilities (N x C).
+        np.ndarray: Ensemble probabilities (N x C)
     """
-    ensemble_probs = np.zeros_like(mlp_probs)
-    for c in range(mlp_probs.shape[1]):
-        alpha = weights[f"alpha_extra_{c}"]
-        ensemble_probs[:, c] = alpha * mlp_probs[:, c] + (1 - alpha) * xgb_probs[:, c]
+    ensemble_probs = weights * mlp_probs + (1 - weights) * xgb_probs
     return ensemble_probs
 
