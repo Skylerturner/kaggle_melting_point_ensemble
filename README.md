@@ -1,34 +1,100 @@
-# kaggle_melting_point_ensemble
+# Melting Point Prediction via Ensemble Modeling
 
-This project tackles the Kaggle competition focused on predicting the melting points of organic compounds based on their molecular descriptors.
+This project addresses the **Kaggle melting point prediction challenge**, where the goal is to predict the melting points of organic compounds from molecular descriptors.
 
-## Overview
+## Project Overview
 
-The goal is to accurately predict melting points for a dataset of organic compounds. To improve performance, this project uses an ensemble approach:
+To improve accuracy, this solution uses a **hybrid classification-regression pipeline**:
 
-- **Classification step:** Compounds are first classified into bins (low, medium, high melting point categories) using an ensemble classifier.
-- **Regression step:** Separate XGBoost regression models (XGBRegressors) are trained on each bin to predict melting points within that range.
+- **1. Classification Step:**  
+  Compounds are first categorized into melting point bins (e.g., low, medium, high) using an **ensemble classifier** that combines the outputs of a Multilayer Perceptron (MLP) and an XGBoost classifier.
 
-This bin-wise approach leverages specialized regressors tailored to the distinct melting point ranges, improving overall accuracy.
+- **2. Regression Step:**  
+  Based on the predicted bin, a **bin-specific XGBoost regressor** is applied to predict the actual melting point within that range.  
+  Each bin has its own model, trained and fine-tuned independently for optimal performance.
+
+This two-stage pipeline reduces the solution space for regression and captures heterogeneity across the melting point spectrum.
 
 ## Features
 
-- Custom binning of melting points for better regression modeling
-- Per-bin hyperparameter tuning using `GridSearchCV`
-- Final training and evaluation of XGBRegressor models for each bin
-- Utilities for prediction by bin and visualization of results
-- GPU-accelerated XGBoost training for efficiency
+- **Ensemble Classifier**: Optimized with per-class weights to balance class accuracy  
+- **Feature Selection**: Based on Random Forest feature importance  
+- **Bin-Specific XGBoost Regressors**: Each bin has independently tuned models via `GridSearchCV`
+- **Grid Search Fine-Tuning**: Grid Search methods are used and explained for fine-tuning hyperparameters in every model   
+- **Custom Utilities**: For feature scaling, plotting, bin assignment, and result evaluation  
+- **Final Submission Generation**: Clean CSV output of predictions for competition submission
 
-## Comparison of Notebooks with Different Dataset Sizes
+## Utility Modules
 
-Two notebooks were developed to evaluate how dataset size impacts model performance:
+Core modeling utilities are modularized in the `src/modeling/` directory for reuse and clarity:
 
-- **Competition Dataset Notebook:**  Trains models on a given sample of data (2662 compounds) provided by the competition. This setup ensures full confidence in the results with no risk of data leakage. While this approach provides robust and reliable evaluation, it may exhibit slightly reduced predictive performance due to the smaller dataset size.
-- **Expanded Dataset Notebook:**  Incorporates an external, larger dataset of compounds for training and evaluation (19183 compounds). This expanded dataset typically leads to improved model accuracy but requires more computational resources and longer training times. Additionally, it demands careful handling to avoid data leakage and maintain model integrity.
+- `featurization.py` – Feature extraction, preprocessing, and scaling utilities  
+- `classifier.py` – Training functions and evaluation tools for the MLP and XGBoost classifiers  
+- `regressors.py` – Bin-wise regression utilities including hyperparameter tuning and plotting
 
-Comparing results between these notebooks highlights the trade-off between dataset size, training time, and model accuracy, helping guide practical modeling decisions.
+These modules support the end-to-end pipeline and can be easily extended or modified for future experimentation.
+Each function has a description of expected inputs and what it outputs.
+Example from classifier.py:
 
-## Requirements
+```python
+def train_ensemble_weights(mlp_probs, xgb_probs, y_true):
+    """
+    Optimize per-class ensemble weights for combining MLP and XGB classifier probabilities,
+    using macro-average per-class accuracy.
+
+    Args:
+        mlp_probs (np.ndarray): MLP classifier probabilities (N x C).
+        xgb_probs (np.ndarray): XGB classifier probabilities (N x C).
+        y_true (np.ndarray): True class labels (N,).
+
+    Returns:
+        np.ndarray: Optimized weights per class (array of length C).
+        float: Best per-class accuracy.
+        np.ndarray: Best prediction array.
+    """
+    alphas = np.linspace(0, 1, 11)
+    best_score = 0
+    best_weights = None
+    best_preds = None
+
+    for alpha_0 in alphas:
+        for alpha_1 in alphas:
+            for alpha_2 in alphas:
+                weights = np.array([alpha_0, alpha_1, alpha_2])
+                ensemble_probs = weights * mlp_probs + (1 - weights) * xgb_probs
+                y_pred = np.argmax(ensemble_probs, axis=1)
+
+                # --- Compute per-class accuracy ---
+                cm = confusion_matrix(y_true, y_pred)
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    per_class_acc = np.diag(cm) / np.sum(cm, axis=1)
+                    per_class_acc = np.nan_to_num(per_class_acc)  # replaces NaNs with 0
+                avg_per_class_acc = per_class_acc.mean()
+
+                if avg_per_class_acc > best_score:
+                    best_score = avg_per_class_acc
+                    best_weights = weights
+                    best_preds = y_pred
+
+    return best_weights, best_score, best_preds
+```
+
+## Final Model Performance
+
+- **Test MAE** (Expanded Dataset on Competition Test Set): **~20.58 K**
+- Outperforms many published XGBoost baselines trained on similar-sized datasets
+- Demonstrates the benefit of ensemble classification + per-bin regression
+
+## Future Work
+
+Planned improvements include:
+
+- **Physics-Informed Feature Selection**: Using descriptor knowledge or functional group mappings  
+- **Descriptor-Based Binning**: Instead of empirical binning, use SMILES or molecular similarity  
+- **Hierarchical Classification**: E.g., classify by chemical class before predicting melting point  
+- **Embedding-Based Clustering**: Use NLP/graph embeddings for learned bin structure
+
+## Requirements ( Unsure if these are the true versions I'm using)
 
 - Python 3.7+
 - `numpy`
@@ -37,10 +103,12 @@ Comparing results between these notebooks highlights the trade-off between datas
 - `xgboost`
 - `matplotlib`
 - `joblib`
+- `torch` *(for MLP)*
 
-Install dependencies via:
+Install with:
 
 ```bash
-pip install numpy pandas scikit-learn xgboost matplotlib joblib
+pip install -r requirements.txt
+
 
 
