@@ -64,7 +64,7 @@ def train_ensemble_weights(mlp_probs, xgb_probs, y_true):
                 ensemble_probs = weights * mlp_probs + (1 - weights) * xgb_probs
                 y_pred = np.argmax(ensemble_probs, axis=1)
 
-                # --- Compute per-class accuracy ---
+                # Compute per-class accuracy
                 cm = confusion_matrix(y_true, y_pred)
                 with np.errstate(divide='ignore', invalid='ignore'):
                     per_class_acc = np.diag(cm) / np.sum(cm, axis=1)
@@ -94,21 +94,26 @@ Planned improvements include:
 - **Hierarchical Classification**: E.g., classify by chemical class before predicting melting point  
 - **Embedding-Based Clustering**: Use NLP/graph embeddings for learned bin structure
 
-## Requirements ( Unsure if these are the true versions I'm using)
+## Dependencies
 
-- Python 3.7+
+This project relies on Python 3.10 and the following major packages:
+
 - `numpy`
 - `pandas`
-- `scikit-learn`
-- `xgboost`
+- `scipy`
 - `matplotlib`
-- `joblib`
-- `torch` *(for MLP)*
+- `seaborn`
+- `torch`, `torchvision`, `torchaudio`
+- `rdkit`
+- `xgboost`
+- `scikit-learn`
 
-Install with:
+All other packages and exact versions are specified in the `environment.yml` file.
+
+### Installation
+
+Create and activate the conda environment using:
 
 ```bash
-pip install -r requirements.txt
-
-
-
+conda env create -f environment.yml
+conda activate melting_point
